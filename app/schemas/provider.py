@@ -128,11 +128,18 @@ class CrawlTarget(BaseModel):
 
 
 class CrawlBudget(BaseModel):
+    """Limits for one crawl.
+
+    ``timeout`` is a float because it is compared against a monotonic clock:
+    whole-second resolution cannot express a half-second budget, and truncating
+    it would make short budgets silently un-enforceable.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     max_pages: int = 40
     max_concurrent: int = 5
-    timeout: int = 300
+    timeout: float = 300.0
     max_document_bytes: int = 5_000_000
 
 

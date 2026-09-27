@@ -339,18 +339,24 @@ def should_escalate_to_browser(
 ) -> bool:
     """Whether normal HTTP extraction was insufficient for this page.
 
-    Deliberately conservative. Escalating everything defeats the point of having
-    a fast path, so this returns True only for the cases a browser genuinely
-    fixes: a server error, a request the server refused on our client's
-    credentials, a content-free response, an SPA shell, or a path that is known
-    to be an interactive application.
+    Deliberately conservative, and biased towards *not* escalating: a browser
+    costs seconds, memory and often a CAPTCHA, and firing five of them at a site
+    that is already struggling is discourteous.
 
-    A plain ``404`` is explicitly *not* escalated: the server has given a
-    definitive answer that no amount of JavaScript will change.
+    - ``403``/``401`` escalate: the server is refusing our client, and a real
+      browser with a real user agent frequently gets through.
+    - ``404``/``410`` do not: a definitive answer no amount of JavaScript changes.
+    - ``429`` does not: a browser would deepen the rate limit it just hit.
+    - ``5xx`` does not: a browser cannot repair a broken server, and the second
+      request adds load to a site that is already failing.
+    - A ``200`` with no text escalates: that is an application shell, which is
+      precisely what a browser is for.
     """
-    if status is None or status >= 500 or status in (401, 403, 429):
+    if status is None:
         return True
-    if status == 404:
+    if status in (401, 403):
+        return True
+    if status >= 400:
         return False
     if url_priority(url) < 200 and len(text.strip()) < min_text_chars:
         return True

@@ -28,12 +28,40 @@ class _BoundedSemaphore:
 
 
 async def gather_limited[T](
-    coros: Sequence[Coroutine[Any, Any, T]], *, limit: int = 5
+    coros: Sequence[Coroutine[Any, Any, T]], *, limit: int = 5,
+    deadline: float | None = None
 ) -> list[T]:
     """Run coroutines with at most ``limit`` in flight, preserving input order.
 
-    A coroutine that raises does not cancel its siblings; the exception surfaces
-    at the end. One failed competitor must not abort the other four.
+    A coroutine that raises does not cancel its siblings; the first exception
+    encountered, in input order, is re-raised once every task has settled. One
+    failed competitor must not abort the other four.
+
+    ``deadline`` is the total seconds the whole batch may take, not a per-item
+    timeout. See :func:`gather_settled`.
+    """
+    results = await gather_settled(coros, limit=limit, deadline=deadline)
+    for _, error in results:
+        if error is not None:
+            raise error
+    return [value for value, _ in results]
+
+
+async def gather_settled[T](
+    coros: Sequence[Coroutine[Any, Any, T]], *, limit: int = 5,
+    deadline: float | None = None
+) -> list[tuple[T | None, BaseException | None]]:
+    """Like :func:`gather_limited` but returns ``(value, error)`` pairs.
+
+    Used wherever partial success is the desired behaviour: research collection
+    reports what worked and what did not, rather than failing wholesale.
+
+    ``deadline`` bounds the batch as a whole, not each item. Work still in
+    flight when it expires is cancelled and reported as a :class:`TimeoutError`
+    in its slot, so a batch cannot overrun its budget by starting work it had no
+    time to finish. Naming it ``deadline`` rather than ``timeout`` is deliberate:
+    a per-item timeout would be a different contract, and would be easy to
+    misread as one.
     """
     if not coros:
         return []
@@ -43,27 +71,30 @@ async def gather_limited[T](
         async with semaphore:
             return await coro
 
-    return list(await asyncio.gather(*(run(coro) for coro in coros)))
+    tasks = [asyncio.ensure_future(run(coro)) for coro in coros]
+    try:
+        await asyncio.wait(tasks, timeout=deadline)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-
-async def gather_settled[T](
-    coros: Sequence[Coroutine[Any, Any, T]], *, limit: int = 5
-) -> list[tuple[T | None, BaseException | None]]:
-    """Like :func:`gather_limited` but returns ``(value, error)`` pairs.
-
-    Used wherever partial success is the desired behaviour: research collection
-    reports what worked and what did not, rather than failing wholesale.
-    """
-    if not coros:
-        return []
-
-    async def run(coro: Coroutine[Any, Any, T]) -> tuple[T | None, BaseException | None]:
-        try:
-            return await coro, None
-        except Exception as exc:  # noqa: BLE001 - the error is returned, not raised
-            return None, exc
-
-    return await gather_limited([run(coro) for coro in coros], limit=limit)
+    results: list[tuple[T | None, BaseException | None]] = []
+    for task, coro in zip(tasks, coros, strict=True):
+        if task.cancelled():
+            # A coroutine cancelled before its first step is never awaited, and
+            # Python warns about each one. Close the caller's coroutine: the
+            # task's own coroutine is a wrapper, so closing that would leave the
+            # inner one dangling.
+            close = getattr(coro, "close", None)
+            if close is not None:
+                close()
+            results.append((None, TimeoutError("batch deadline expired")))
+        else:
+            error = task.exception()
+            results.append((None, error) if error else (task.result(), None))
+    return results
 
 
 async def run_with_semaphore[T](

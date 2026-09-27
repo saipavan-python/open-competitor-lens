@@ -31,6 +31,8 @@ from app.schemas.provider import (
     RetrievedChunk,
 )
 from app.schemas.search import SearchHit
+from app.utils.classification import classify_page
+from app.utils.urls import canonicalize_url
 
 log = get_logger(__name__)
 
@@ -192,12 +194,25 @@ class OfflineSearchProvider(_OfflineBase):
 
 
 class OfflineWebProvider(_OfflineBase):
-    """Serves declared fixtures by URL; anything else is ``not_found``."""
+    """Serves declared fixtures by URL; anything else is ``not_found``.
+
+    Fixtures are keyed by canonical URL, so a fixture registered for
+    ``https://acme.com/`` is found by a request for ``https://acme.com?utm_source=x``
+    exactly as the real web would find it. Keying on the raw string instead would
+    make every offline test brittle about trailing slashes, and would hide the
+    very canonicalisation behaviour the tests are meant to exercise.
+    """
 
     def __init__(self, name: str = "offline", pages: dict[str, FetchResult] | None = None
                  ) -> None:
         super().__init__(name)
-        self._pages: dict[str, FetchResult] = dict(pages or {})
+        self._pages: dict[str, FetchResult] = {}
+        for url, result in (pages or {}).items():
+            self._pages[self._key(url)] = result
+
+    @staticmethod
+    def _key(url: str) -> str:
+        return canonicalize_url(url) or url
 
     def add(
         self, url: str, *, text: str = "", html: str | None = None,
@@ -214,15 +229,19 @@ class OfflineWebProvider(_OfflineBase):
             provider=self.name,
             content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
             content_length=len(text),
+            page_type=classify_page(url, html or "", text).value,
         )
-        self._pages[url] = result
+        self._pages[self._key(url)] = result
         return result
 
     async def fetch(self, url: str) -> FetchResult:
-        return self._pages.get(url, FetchResult(
+        found = self._pages.get(self._key(url))
+        if found is not None:
+            return found
+        return FetchResult(
             url=url, final_url=url, status=404, retrieval_status="not_found",
             error="no offline fixture registered for this URL", provider=self.name,
-        ))
+        )
 
     async def extract(self, url: str, schema: type[Any]) -> dict[str, Any]:
         result = await self.fetch(url)
