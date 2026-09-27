@@ -48,6 +48,11 @@ BLOCKED_URLS = [
     "http://192.168.1.1/x",
     "http://169.254.169.254/latest/meta-data/",
     "http://169.254.1.1/x",
+    # RFC 6598 shared address space. ``is_private`` does not cover it, so the
+    # guard used to allow it - and it is precisely the range that reaches
+    # internal service and proxy endpoints in cloud and container networks.
+    "http://100.64.0.1/x",
+    "http://100.127.255.254/x",
     "http://0.0.0.0/x",
     "http://255.255.255.255/x",
     "http://localhost/x",

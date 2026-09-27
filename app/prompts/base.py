@@ -31,6 +31,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.schemas.evidence import Evidence, Passage, Source
 from app.schemas.provider import ChatMessage
@@ -171,6 +172,37 @@ EVIDENCE RULES — these are absolute, and they are checked after you answer:
 """
 
 
+def _secret_values() -> list[tuple[str, str]]:
+    """Every credential-shaped value this process can see, with its name.
+
+    Two sources, and the second one is the one that matters. ``os.environ`` is
+    what CI sets and what a shell exports. But :mod:`app.core.config` loads a
+    ``.env`` file at import time, so in the deployment path that actually
+    matters the credentials are in ``Settings`` and *not* in ``os.environ``.
+    Scanning the environment alone meant the guard never saw them.
+    """
+    found: list[tuple[str, str]] = []
+    for name, value in os.environ.items():
+        if not value or len(value) < _MIN_SECRET_LENGTH:
+            continue
+        if not any(marker in name.upper() for marker in _SECRET_ENV_MARKERS):
+            continue
+        found.append((name, value))
+
+    try:
+        settings = get_settings()
+    except Exception:  # noqa: BLE001 - a broken config must not break prompt building
+        return found
+    for name, value in settings.model_dump().items():
+        if not isinstance(value, str) or len(value) < _MIN_SECRET_LENGTH:
+            continue
+        if not any(marker in name.upper() for marker in _SECRET_ENV_MARKERS):
+            continue
+        if all(value != existing for _, existing in found):
+            found.append((f"settings.{name}", value))
+    return found
+
+
 def assert_no_secrets(text: str) -> str:
     """Refuse to return a prompt containing a credential from the environment.
 
@@ -179,11 +211,7 @@ def assert_no_secrets(text: str) -> str:
     interpolates ``settings.model_dump()`` or a URL with an embedded key, which
     looks like a normal field in review and would otherwise ship silently.
     """
-    for name, value in os.environ.items():
-        if not value or len(value) < _MIN_SECRET_LENGTH:
-            continue
-        if not any(marker in name.upper() for marker in _SECRET_ENV_MARKERS):
-            continue
+    for name, value in _secret_values():
         if value in text:
             raise PromptLeakError(
                 f"rendered prompt contains the value of {name}; prompts must "

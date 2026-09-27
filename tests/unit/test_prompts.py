@@ -14,8 +14,6 @@ and is bound to a real output schema and a real routing table entry.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 from pydantic import BaseModel
 
@@ -163,19 +161,24 @@ class TestNoCredentialLeaks:
         monkeypatch.setenv("ACME_TEST_TOKEN", "a" * 20)
         assert assert_no_secrets("nothing secret here") == "nothing secret here"
 
-    def test_no_prompt_leaks_a_real_credential_from_the_environment(self) -> None:
-        """The real risk: a prompt interpolating settings or a URL with a key."""
-        secrets = [
-            value
-            for name, value in os.environ.items()
-            if value
-            and len(value) >= 8
-            and any(m in name.upper() for m in ("API_KEY", "TOKEN", "SECRET", "PASSWORD"))
-        ]
+    def test_no_prompt_leaks_a_real_credential_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The real risk: a prompt interpolating settings or a URL with a key.
+
+        A sentinel is planted first. The previous version built its list of
+        secrets from ``os.environ`` and asserted none of them appeared in any
+        prompt - on CI, and on any machine without credentials exported, that
+        list was empty, the inner loop never ran, and the test passed without
+        checking anything. It was the project's headline anti-leak test and it
+        verified nothing in normal use.
+        """
+        sentinel = "sentinel-" + "k" * 24
+        monkeypatch.setenv("OPENAI_API_KEY", sentinel)
+        monkeypatch.setenv("ACME_DEPLOY_TOKEN", sentinel)
         for name in ALL:
             rendered = "\n".join(m.content for m in get(name).build(_ctx()))
-            for secret in secrets:
-                assert secret not in rendered, f"{name} leaked {name}"
+            assert sentinel not in rendered, f"the {name} prompt leaked a credential"
 
     def test_the_context_cannot_carry_arbitrary_attributes(self) -> None:
         """A closed model is what stops ``ctx.settings`` becoming a leak."""

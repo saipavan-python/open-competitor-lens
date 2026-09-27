@@ -58,11 +58,20 @@ REFUTED_VERDICTS: frozenset[ClaimVerdict] = frozenset(
 )
 
 #: Fields whose text a reader reads as prose, and so is searched for statistics.
+#:
+#: ``warnings`` and ``failed_steps`` are deliberately absent. They describe the
+#: run, not the companies: "pricing analysis (step 3 of 9) failed: timeout" and
+#: "Retrieved 4 sources for 2 competitors" are facts about this execution, and
+#: the run is its own evidence for them - no web citation can or should support
+#: them. Treating them as prose made every digit in them a *critical* issue, and
+#: because the built-in repairs only remove refuted claims, no amount of repair
+#: could clear it: a report that truthfully admitted a step had failed could
+#: never reach ``passed=True``. That is the opposite of the point. A run that
+#: hides its own failures should be fixed here; one that reports them must not be
+#: failed for reporting them.
 PROSE_FIELDS: tuple[str, ...] = (
     "observed_gaps",
     "risks",
-    "warnings",
-    "failed_steps",
 )
 
 RepairHook = Callable[[ReportBundle, int], None]

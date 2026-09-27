@@ -17,7 +17,7 @@ from app.core.logging import get_logger
 from app.schemas.provider import FetchResult
 from app.utils.classification import classify_page
 from app.utils.hashing import sha256_text
-from app.utils.urls import validate_url
+from app.utils.urls import SSRFError, validate_url
 
 log = get_logger(__name__)
 
@@ -56,9 +56,37 @@ class FirecrawlWebProvider:
         html = document.get("html") or ""
         if len(text) > self.max_bytes:
             text = text[: self.max_bytes]
+        # The cap above trimmed ``text`` only. ``html`` is what gets classified
+        # and stored, so an oversized document was bounded in one field and not
+        # the other, and the limit was not enforced on the wire either.
+        html = html[: self.max_bytes]
+
+        # Firecrawl reports the URL it actually fetched in ``sourceURL``. That is
+        # attacker-influenced - it is whatever the scraped page resolved to - and
+        # it is recorded as ``final_url`` and then used to classify the page, so
+        # it has to clear the same guard as the URL we asked for. A page that
+        # redirects to a metadata endpoint gets a 200 from Firecrawl's network
+        # and would otherwise be recorded as a successful retrieval of it.
+        final_url = url
+        reported = metadata.get("sourceURL")
+        if reported and reported != url:
+            try:
+                validate_url(reported)
+            except SSRFError as exc:
+                log.warning(
+                    "blocked a scraped page that resolved to an internal host",
+                    extra={"url": url, "reported_url": reported, "reason": str(exc)},
+                )
+                return FetchResult(
+                    url=url, final_url=None, status=None, provider=self.name,
+                    retrieval_status="blocked", error=str(exc),
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+            final_url = reported
+
         return FetchResult(
             url=url,
-            final_url=metadata.get("sourceURL") or url,
+            final_url=final_url,
             status=200,
             content_type="text/markdown",
             text=text,
@@ -66,7 +94,7 @@ class FirecrawlWebProvider:
             title=metadata.get("title"),
             content_hash=sha256_text(text),
             provider=self.name,
-            page_type=classify_page(url, html, text).value,
+            page_type=classify_page(final_url, html, text).value,
             content_length=len(text),
             duration_ms=int((time.monotonic() - started) * 1000),
         )

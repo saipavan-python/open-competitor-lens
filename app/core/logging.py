@@ -29,12 +29,49 @@ _SECRET_PATTERNS = (
                r"[\"'\s:=]+[A-Za-z0-9_\-\.]{8,}"),
 )
 
+#: Absolute local filesystem paths. A traceback, a provider error, or a config
+#: message routinely names the directory the process runs in, which is a free
+#: reconnaissance gift to anyone reading a public error body or a log tail.
+#: Neither a reader nor a client needs it.
+_PATH_PATTERNS = (
+    re.compile(r"[A-Za-z]:\\Users\\[^\s\"'<>|]+"),
+    re.compile(r"(?:/home/|/Users/|/root/)[^\s\"'<>|]+"),
+)
+
 
 def redact(text: str) -> str:
-    """Replace anything credential-shaped in ``text`` with ``[redacted]``."""
+    """Replace anything credential-shaped in ``text`` with ``[redacted]``.
+
+    Also strips absolute local paths, for the reason in ``_PATH_PATTERNS``.
+    """
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub("[redacted]", text)
+    for pattern in _PATH_PATTERNS:
+        text = pattern.sub("[path]", text)
     return text
+
+
+def _safe_context(value: Any) -> Any:
+    """``value``, with anything credential-shaped in it redacted.
+
+    Context fields need this as much as the message does, and more: ``error`` is
+    a context field, and every provider's failure path fills it with
+    ``str(provider_exception)``. Those strings carry the request URL, sometimes
+    the response headers, and occasionally the key itself - so a provider
+    timeout was a working way to print a Tavily or Firecrawl key to stdout. The
+    message and the traceback were redacted; these were not, which made the
+    module's own claim ("anything that looks like a credential is redacted
+    before it reaches a handler") true only of the parts a reader would have
+    looked at.
+
+    Primitives pass through unchanged, since ``duration_ms=1204`` cannot contain
+    a secret and turning it into a string would be noise.
+    """
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return redact(str(value))
 
 
 class JsonFormatter(logging.Formatter):
@@ -50,7 +87,7 @@ class JsonFormatter(logging.Formatter):
         for field in CONTEXT_FIELDS:
             value = getattr(record, field, None)
             if value is not None:
-                payload[field] = value
+                payload[field] = _safe_context(value)
         if record.exc_info:
             payload["exception"] = redact(self.formatException(record.exc_info))
         return json.dumps(payload, default=str, ensure_ascii=False)
@@ -63,7 +100,7 @@ class TextFormatter(logging.Formatter):
         bits = [f"{self.formatTime(record, '%H:%M:%S')}", f"{record.levelname:<7}",
                 record.name, redact(record.getMessage())]
         context = " ".join(
-            f"{field}={getattr(record, field)}"
+            f"{field}={_safe_context(getattr(record, field))}"
             for field in CONTEXT_FIELDS
             if getattr(record, field, None) is not None
         )

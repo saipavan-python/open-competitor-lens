@@ -136,6 +136,14 @@ def canonicalize_url(raw: str) -> str | None:
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
+#: Carrier-grade NAT space, RFC 6598. Not covered by ``is_private``, so the
+#: checks below missed it, and it is exactly the range that reaches internal
+#: service and proxy endpoints in cloud, container and corporate networks -
+#: which is the whole point of the guard. Checked explicitly for the same reason
+#: ``is_link_local`` is: it is where the cloud metadata endpoints live.
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+
 def _ip_is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
     """Return a human reason when an address must not be requested."""
     if address.is_loopback:
@@ -144,6 +152,8 @@ def _ip_is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> st
         return "link-local address (includes cloud metadata endpoints)"
     if address.is_private:
         return "private address"
+    if address in _CGNAT:
+        return "carrier-grade NAT address (shared address space)"
     if address.is_multicast:
         return "multicast address"
     if address.is_reserved or address.is_unspecified:

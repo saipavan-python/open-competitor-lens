@@ -50,6 +50,7 @@ from app.schemas.report import (
     ReportMetadata,
 )
 from app.services.quality_service import MAX_REPORT_REPAIR_ROUNDS, QualityService
+from app.utils.text import numeric_tokens
 
 NOW = datetime.now(UTC)
 
@@ -514,6 +515,130 @@ class TestFactChecker:
         assert unsupported_numeric_tokens(
             "Acme serves 12,000 customers", "Acme serves 12,000 customers."
         ) == []
+
+
+class TestNumbersWrittenWithAUnitOrARate:
+    """A price is the one thing this agent must never invent.
+
+    Found by reviewing the whole branch before publishing: the number pattern
+    ended in ``(?![\\w/])`` so that a figure followed by ``/`` matched nothing at
+    all. ``$50/mo`` - the canonical way to write a price - tokenised to nothing,
+    and ``2.4x`` backtracked to the bare figure ``2``. Both then passed the gate
+    against evidence that did not contain them, so a model could invent a
+    competitor's price and be certified as evidence-backed. The tests below are
+    the ones that would have caught it; every one of them passed before.
+    """
+
+    def test_a_price_written_per_month_is_recognised_as_a_figure(self) -> None:
+        assert "$50/mo" in numeric_tokens("Acme is $50/mo versus Beta $80/mo")
+
+    def test_an_invented_price_is_flagged(self) -> None:
+        """The headline case: the claim says $50/mo, the source says $20/mo."""
+        assert unsupported_numeric_tokens(
+            "Acme is $50/mo", "Beta lists a plan at $20 per month."
+        ) == ["$50/mo"]
+
+    def test_an_annual_price_is_recognised_and_flagged(self) -> None:
+        assert unsupported_numeric_tokens(
+            "Acme is priced at $99/year", "No pricing is published on this page."
+        ) == ["$99/year"]
+
+    def test_a_multiple_is_not_degraded_to_its_first_digits(self) -> None:
+        """``2.4x`` used to match as ``2``, which the evidence usually contains."""
+        assert numeric_tokens("Acme has 2.4x the market share") == ["2.4x"]
+
+    def test_an_invented_multiple_is_flagged(self) -> None:
+        assert unsupported_numeric_tokens(
+            "Acme has 2.4x the market share of Beta",
+            "Beta was founded in 2019 and has 2 offices.",
+        ) == ["2.4x"]
+
+    def test_a_price_written_per_user_is_recognised(self) -> None:
+        assert "$10 per user" in numeric_tokens("costs $10 per user per month")
+
+    def test_a_large_user_count_is_still_found(self) -> None:
+        """The commas must not be mistaken for part of a path or a unit."""
+        assert unsupported_numeric_tokens(
+            "Acme serves 1,000,000 customers", "Beta says it serves 400,000 customers."
+        ) == ["1,000,000"]
+
+    def test_a_rating_out_of_five_is_still_a_figure(self) -> None:
+        assert "4.9" in numeric_tokens("rated 4.9/5 by reviewers")
+
+    def test_the_same_figure_written_two_ways_is_still_matched(self) -> None:
+        """``$50/mo`` in a claim must match ``$50 per month`` in a quote."""
+        assert unsupported_numeric_tokens(
+            "Acme is $50/mo", "Acme lists $50 per month."
+        ) == []
+
+    def test_a_currency_symbol_in_the_claim_matches_a_bare_number(self) -> None:
+        """The comparison is on the figure, so ``$10`` matches ``10`` in a quote.
+
+        The old comparison ran on the whole matched token, currency included, so
+        this honest case was flagged - the rule that only exists to catch
+        invented figures was raising the alarm on correct ones.
+        """
+        assert unsupported_numeric_tokens(
+            "Acme costs $10", "The page says 10 for the starter tier."
+        ) == []
+
+    def test_thousands_separators_do_not_hide_a_mismatch(self) -> None:
+        assert unsupported_numeric_tokens(
+            "serves 1,000,000 users", "serves 1000000 customers"
+        ) == []
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "node20 and k8s and x86 are not figures",
+            "a 5GB disk",
+            "Founded in 2019 in Dublin",
+        ],
+    )
+    def test_identifiers_specs_and_years_are_still_not_figures(self, text: str) -> None:
+        """The exclusions the pattern existed for must survive the fix."""
+        assert numeric_tokens(text) == []
+
+
+class TestRunTelemetryIsNotReaderProse:
+    """A report that admits a step failed must still be able to pass.
+
+    Found while reviewing the branch before publishing. ``warnings`` and
+    ``failed_steps`` were in ``PROSE_FIELDS``, so every digit in them became a
+    *critical* unevidenced statistic - "step 3 of 9" and "4 sources for 2
+    competitors". Those are facts about this execution, which the run is its own
+    evidence for, and no web citation could support them. Worse, the built-in
+    repairs only remove refuted claims, so the issue was permanent: every run
+    that reported a failure or a count was unpassable, and the quality gate's
+    verdict carried no information.
+    """
+
+    def test_a_reported_step_failure_does_not_block_the_report(self) -> None:
+        report = _report(
+            failed_steps=["pricing analysis (step 3 of 9) failed: timeout"]
+        )
+        outcome = QualityService().check(report)
+        assert outcome.passed, [issue.message for issue in outcome.critical_issues]
+
+    def test_a_source_count_in_a_warning_does_not_block_the_report(self) -> None:
+        report = _report(warnings=["Retrieved 4 sources for 2 competitors"])
+        outcome = QualityService().check(report)
+        assert outcome.passed, [issue.message for issue in outcome.critical_issues]
+
+    def test_no_unevidenced_statistic_is_raised_against_telemetry(self) -> None:
+        report = _report(
+            warnings=["Retrieved 4 sources for 2 competitors"],
+            failed_steps=["pricing analysis (step 3 of 9) failed: timeout"],
+        )
+        outcome = QualityService().check(report)
+        codes = {issue.code for issue in outcome.critical_issues}
+        assert "unevidenced_statistic" not in codes
+
+    def test_real_prose_is_still_checked(self) -> None:
+        """The exemption is for telemetry, not a loophole for the narrative."""
+        report = _report(observed_gaps=["Acme serves 900,000 customers"])
+        outcome = QualityService().check(report)
+        assert "unevidenced_statistic" in {i.code for i in outcome.critical_issues}
 
 
 class TestReportRepairRemovesTheSentence:

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.core.logging import redact
+
 
 class AppError(Exception):
     """Base class for every deliberate failure in the application."""
@@ -32,10 +34,17 @@ class AppError(Exception):
 
         Contains the message and routing metadata only - never a traceback,
         never a credential, never an internal filesystem path.
+
+        The redaction is not decorative. This dict is what the API error handler
+        returns, and the LLM adapters build their messages from
+        ``str(provider_exception)`` - which is how an OpenAI or Gemini failure
+        arrives carrying the request URL, the organisation id, and whatever
+        header the SDK echoed. Returning ``self.message`` verbatim made the
+        promise above false for exactly the errors most likely to be leaked.
         """
         return {
             "type": type(self).__name__,
-            "message": self.message,
+            "message": redact(self.message),
             "retryable": self.retryable,
             "provider": self.provider,
             "step": self.step,

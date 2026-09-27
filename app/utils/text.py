@@ -139,16 +139,31 @@ def extract_quote(text: str, needle: str, *, window: int = 320) -> str | None:
 
 
 #: A number that looks like a statistic: an optional currency symbol, thousands
-#: separators, a decimal part, an optional percentage or magnitude suffix. The
-#: lookbehind and lookahead keep version numbers, ``k8s`` and ``node20`` from
-#: being read as figures.
+#: separators, a decimal part, then an optional percentage, magnitude, *rate* or
+#: *multiple* suffix.
+#:
+#: The rate and multiple suffixes are the whole point, and they used to be
+#: missing. A trailing ``(?![\\/])`` was meant to keep dates out, but ``/`` is
+#: also how a price is written, so ``$50/mo`` matched nothing at all and
+#: ``2.4x`` degraded to the bare figure ``2`` once the regex backtracked. Both
+#: then passed the fact checker's gate against unrelated evidence - a model could
+#: invent a competitor's price and be certified as evidence-backed, which is the
+#: one failure this project exists to prevent. The date case is already covered
+#: by ``_YEAR`` plus the lookbehind rejecting a figure preceded by ``/``, so the
+#: slash is consumed as a unit instead of being a reason to skip the number.
+#:
+#: The lookbehind still rejects a figure that is part of an identifier, so
+#: ``k8s``, ``node20`` and ``x86`` are not statistics. A trailing ``(?!\\w)``
+#: still rejects an unlisted letter, so ``5GB`` is a spec rather than a figure.
 _NUMBER = re.compile(
     r"(?<![\w/])"
     r"(?:[$€£]\s?)?"
-    r"\d[\d,]*(?:\.\d+)?"
+    r"(\d[\d,]*(?:\.\d+)?)"
     r"\s?(?:%|percent|per cent)?"
     r"\s?(?:[kKmMbB]|bn|mn)?"
-    r"(?![\w/])",
+    r"(?:\s?(?:/|per\s)\s?[A-Za-z]{1,12})?"
+    r"\s?x?"
+    r"(?!\w)",
     re.IGNORECASE,
 )
 
@@ -178,8 +193,27 @@ def _line_at(text: str, index: int) -> str:
     return text[start:] if end == -1 else text[start:end]
 
 
+def _figures(text: str) -> list[tuple[str, str]]:
+    """Every statistic-looking number in ``text``, as ``(as written, bare)``.
+
+    The bare figure is group 1: the digits alone, with thousands separators
+    removed and any currency, magnitude, rate or multiple suffix dropped. Both
+    forms are needed - the report quotes the number as the author wrote it,
+    while the comparison is on the digits.
+    """
+    found: list[tuple[str, str]] = []
+    for match in _NUMBER.finditer(text or ""):
+        figure = match.group(1).replace(",", "")
+        if not figure or _YEAR.match(figure):
+            continue
+        if _NON_STATISTIC_CONTEXT.search(_line_at(text or "", match.start())):
+            continue
+        found.append((match.group(0).strip(), figure))
+    return found
+
+
 def numeric_tokens(text: str) -> list[str]:
-    """Every statistic-looking number in a piece of text.
+    """Every statistic-looking number in a piece of text, as written.
 
     Years and non-statistic contexts are excluded here rather than at the call
     sites, so a year cannot be smuggled past the check by a caller that forgot the
@@ -189,31 +223,21 @@ def numeric_tokens(text: str) -> list[str]:
     quality service applies the same rule to the same prose, and a service
     importing from the agent layer above it would invert the dependency.
     """
-    found: list[str] = []
-    for match in _NUMBER.finditer(text or ""):
-        token = match.group(0).strip()
-        digits = token.lstrip("$" + "\u20ac\u00a3 ").rstrip("%").replace(",", "")
-        digits = re.sub(r"(?:%|percent|per cent)$", "", digits, flags=re.IGNORECASE)
-        digits = re.sub(r"[kKmMbB]|bn|mn$", "", digits).strip()
-        if not digits or _YEAR.match(digits):
-            continue
-        if _NON_STATISTIC_CONTEXT.search(_line_at(text or "", match.start())):
-            continue
-        found.append(token)
-    return found
+    return [token for token, _ in _figures(text)]
 
 
 def unsupported_numeric_tokens(claim: str, evidence_text: str) -> list[str]:
     """Numbers in a claim that no evidence text contains.
 
-    Compared on digits alone, so "$10" in a claim matches "10" in a quote and
+    Compared on the bare figure, so "$10" in a claim matches "10" in a quote and
     "10,000" matches "10000" - the same figure written the two ways prose and
     tables write it. A claim whose number appears nowhere in its evidence is
     reporting something the source does not say.
+
+    The comparison used to be on the whole matched token, currency and unit
+    included, which quietly contradicted the rule above: a claim citing "$10"
+    was flagged against a quote saying "10", so the honest cases were the ones
+    that raised the alarm.
     """
     haystack = re.sub(r"[,\s]", "", evidence_text or "")
-    missing: list[str] = []
-    for token in numeric_tokens(claim):
-        if re.sub(r"[,\s]", "", token) not in haystack:
-            missing.append(token)
-    return missing
+    return [token for token, figure in _figures(claim) if figure not in haystack]

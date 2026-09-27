@@ -18,6 +18,7 @@ import pytest
 
 from app.agents.base import AgentContext
 from app.agents.competitor_agent import (
+    POOL_HARD_CAP_MULTIPLE,
     CandidateSignals,
     CompetitorAgent,
     Validator,
@@ -223,6 +224,28 @@ class TestPoolSelection:
         for count in (3, 5, 8):
             size = agent.pool_size_for(competitor_count=count)
             assert 2 * count <= size <= 4 * count, count
+
+    def test_raising_the_minimum_multiple_actually_widens_the_pool(self) -> None:
+        """It used to be a dead parameter, so the tuning looked like it worked."""
+        default = self._agent().pool_size_for(competitor_count=5)
+        widened = CompetitorAgent(
+            validator=self._agent()._validator, min_multiple=6
+        ).pool_size_for(competitor_count=5)
+        assert widened > default
+
+    def test_raising_the_maximum_multiple_actually_widens_the_pool(self) -> None:
+        """The old literal ``3`` capped the pool below ``max_multiple``."""
+        default = self._agent().pool_size_for(competitor_count=5)
+        widened = CompetitorAgent(
+            validator=self._agent()._validator, max_multiple=5
+        ).pool_size_for(competitor_count=5)
+        assert widened > default
+
+    def test_no_multiple_setting_can_unbound_the_pool(self) -> None:
+        from app.agents.competitor_agent import CompetitorAgent
+
+        agent = CompetitorAgent(validator=self._agent()._validator, min_multiple=500)
+        assert agent.pool_size_for(competitor_count=5) == 5 * POOL_HARD_CAP_MULTIPLE
 
     def test_rejected_candidates_are_recorded_with_their_reason(self) -> None:
         pool = self._pool(4)

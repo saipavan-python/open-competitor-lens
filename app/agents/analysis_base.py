@@ -330,8 +330,10 @@ class CategoryAnalyst(ABC):
                 agent=self.name,
                 status=AgentStatus.FAILED,
                 errors=[
-                    f"{self.name} returned no parsable JSON object: "
-                    f"{response.content[:200]!r}"
+                    f"{self.name} returned no parsable JSON object "
+                    f"({len(response.content)} characters, model "
+                    f"{response.model!r}, finish_reason "
+                    f"{response.finish_reason!r})"
                 ],
                 warnings=[UNPARSABLE],
             )

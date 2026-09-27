@@ -74,6 +74,11 @@ VALIDATION_SIGNALS: tuple[str, ...] = (
 POOL_MIN_MULTIPLE = 2
 POOL_MAX_MULTIPLE = 4
 
+#: The absolute ceiling on the pool, whatever the multiples are set to. A caller
+#: raising ``min_multiple`` to chase under-recall gets a wider pool, but never
+#: an unbounded one - the cost of the pool is a discovery call per candidate.
+POOL_HARD_CAP_MULTIPLE = 6
+
 
 class Validator:
     """Decides whether a candidate genuinely competes with the target."""
@@ -258,12 +263,22 @@ class CompetitorAgent(Agent):
     def pool_size_for(self, competitor_count: int) -> int:
         """How many candidates to gather for a requested competitor count.
 
-        Three times, capped at four: wide enough that validation has something to
-        reject, and the cap exists so a large requested count cannot fan out
-        without limit.
+        Between ``min_multiple`` and ``max_multiple`` times the count, and never
+        more than :data:`POOL_HARD_CAP_MULTIPLE` times: wide enough that
+        validation has something to reject, bounded so a large requested count
+        cannot fan out without limit.
+
+        The previous version was ``min(count * max_multiple, count * 3)``, where
+        the ``3`` was a literal. Two things followed from that, both of them
+        silent. ``min_multiple`` was never read, so a caller raising it to widen
+        the pool got no change at all; and the literal capped the pool below
+        ``max_multiple``, so raising *that* was equally inert. A parameter whose
+        only documented job is to be tuned, and which cannot be, is worse than
+        none: the tuning looks like it is working.
         """
         count = max(1, competitor_count)
-        return min(count * self._max_multiple, count * 3)
+        wanted = count * max(self._min_multiple, self._max_multiple)
+        return min(wanted, count * POOL_HARD_CAP_MULTIPLE)
 
     def select(
         self, pool: Sequence[CandidateSignals], *, competitor_count: int

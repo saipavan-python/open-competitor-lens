@@ -141,9 +141,21 @@ def _field_defaults(schema: Any) -> dict[str, Any] | None:
 
 
 def _synthesize(schema: Any, prompt: str) -> dict[str, Any]:
+    """A structurally valid instance of ``schema``, from its own field defaults.
+
+    Deliberately returns *only* the schema's fields. An earlier version added
+    ``_offline`` and ``_source`` keys to mark the payload as a fixture, and every
+    one of those calls then failed: every domain model is ``extra="forbid"``, so
+    ``parse_structured`` rejected the extra keys and the offline path could not
+    produce a single parseable answer. The pipeline this module exists to make
+    testable therefore never ran.
+
+    The provenance belongs in the envelope, not the payload. It is already there:
+    ``LLMResponse.provider`` is ``"offline"`` and its ``model`` is
+    ``"offline-<role>"``. String values are still prefixed ``[offline-fixture]``
+    so a synthesized answer can never be mistaken for retrieved text.
+    """
     fields = _field_defaults(schema) or {}
-    fields.setdefault("_offline", True)
-    fields.setdefault("_source", "offline-fixture")
     del prompt
     return fields
 
@@ -160,6 +172,12 @@ class OfflineSearchProvider(_OfflineBase):
                  ) -> None:
         super().__init__(name)
         self._results: list[SearchHit] = list(results or [])
+        #: Terms per URL, used only to rank the fixtures. Held beside the hits
+        #: rather than on them: ``SearchHit`` is ``extra="forbid"`` with
+        #: ``validate_assignment=True``, so setting a ``metadata`` attribute on it
+        #: raised on every single ``add`` call and no offline search could be
+        #: registered at all. Terms are a fixture-matching aid, not a domain field.
+        self._terms: dict[str, list[str]] = {}
 
     def add(
         self, url: str, *, title: str | None = None, snippet: str | None = None,
@@ -172,7 +190,8 @@ class OfflineSearchProvider(_OfflineBase):
             domain=url.split("/")[2] if "://" in url else None,
             provider=self.name,
         )
-        hit.metadata = " ".join(terms or [])  # type: ignore[attr-defined]
+        if terms:
+            self._terms[url] = list(terms)
         self._results.append(hit)
         return hit
 
@@ -182,7 +201,12 @@ class OfflineSearchProvider(_OfflineBase):
         scored: list[tuple[int, int, SearchHit]] = []
         for index, hit in enumerate(self._results):
             haystack = " ".join(
-                part for part in (hit.title, hit.snippet, getattr(hit, "metadata", ""))
+                part
+                for part in (
+                    hit.title,
+                    hit.snippet,
+                    " ".join(self._terms.get(hit.url, ())),
+                )
                 if part
             ).lower()
             score = sum(1 for term in terms if term in haystack)
