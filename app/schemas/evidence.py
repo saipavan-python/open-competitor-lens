@@ -154,6 +154,18 @@ class EvidenceBundle(DomainModel):
     def evidence_ids(self) -> list[str]:
         return [item.id for item in self.evidence]
 
+    @property
+    def claims_supported(self) -> int:
+        """How many separate pieces of evidence back this claim.
+
+        A count rather than a boolean, because the report has to distinguish
+        "one page said so" from "three independent pages said so". It is
+        confounded by the duplication check upstream — two near-identical pages
+        of the same site collapse to one source, so this counts distinct sources
+        rather than distinct pages.
+        """
+        return len({item.source_id for item in self.evidence})
+
 
 class Citation(DomainModel):
     """A resolvable link from a report claim back to a public URL."""

@@ -7,7 +7,9 @@ work it does not itself perform.
 """
 
 from app.services.cache_service import CacheEntry, CacheLookup, ContentCache
+from app.services.citation_service import CitationResolution, CitationService
 from app.services.crawling_service import CrawlingService, CrawlReport, discover_links
+from app.services.evidence_service import EvidenceService
 from app.services.extraction_service import (
     DedupDecision,
     Deduplicator,
@@ -18,11 +20,14 @@ from app.services.extraction_service import (
 __all__ = [
     "CacheEntry",
     "CacheLookup",
+    "CitationResolution",
+    "CitationService",
     "ContentCache",
     "CrawlReport",
     "CrawlingService",
     "DedupDecision",
     "Deduplicator",
+    "EvidenceService",
     "ExtractionResult",
     "ExtractionService",
     "discover_links",
