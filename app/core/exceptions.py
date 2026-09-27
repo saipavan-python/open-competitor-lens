@@ -53,9 +53,11 @@ class ProviderNotConfiguredError(AppError):
     always visible rather than pretending to work.
     """
 
-    def __init__(self, provider: str, missing_env_var: str) -> None:
+    def __init__(self, provider: str, missing_env_var: str, *, message: str | None = None
+                 ) -> None:
         super().__init__(
-            f"Provider '{provider}' is not configured. Set {missing_env_var}.",
+            message
+            or f"Provider '{provider}' is not configured. Set {missing_env_var}.",
             retryable=False,
             provider=provider,
         )

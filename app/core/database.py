@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from sqlalchemy import text
+from sqlalchemy import MetaData, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -70,23 +70,19 @@ class Database:
                 await active.rollback()
                 raise
 
-    async def create_all(self) -> None:
-        """Create the schema. Used by tests and ``scripts/init_db.py`` only.
+    async def create_all(self, metadata: MetaData) -> None:
+        """Create the tables described by ``metadata``.
 
-        Production deployments must use Alembic migrations instead; see the
-        README. This method exists so a developer can get a working database
-        without a migration step.
+        The metadata is passed in rather than imported, because ``core`` sits
+        below ``models`` in the dependency graph and must not reach upwards to
+        find it. Call :func:`app.models.create_schema` to do both steps.
         """
-        from app.models import Base  # noqa: PLC0415 - avoid import cycle
-
         async with self._engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(metadata.create_all)
 
-    async def drop_all(self) -> None:
-        from app.models import Base  # noqa: PLC0415 - avoid import cycle
-
+    async def drop_all(self, metadata: MetaData) -> None:
         async with self._engine.begin() as connection:
-            await connection.run_sync(Base.metadata.drop_all)
+            await connection.run_sync(metadata.drop_all)
 
     async def health_check(self) -> bool:
         """Return True when the database answers a trivial query."""

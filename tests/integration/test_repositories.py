@@ -23,6 +23,7 @@ from app.models import (
     FindingModel,
     ResearchRunModel,
     SourceModel,
+    create_schema,
 )
 from app.repositories.company_repository import CompanyRepository
 from app.repositories.evidence_repository import EvidenceRepository
@@ -33,7 +34,7 @@ from app.repositories.source_repository import SourceRepository
 @pytest_asyncio.fixture()
 async def database(tmp_path: Path) -> Database:
     db = Database(f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}")
-    await db.create_all()
+    await create_schema(db)
     yield db
     await db.dispose()
 

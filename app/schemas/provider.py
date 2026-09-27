@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -133,3 +134,42 @@ class CrawlBudget(BaseModel):
     max_concurrent: int = 5
     timeout: int = 300
     max_document_bytes: int = 5_000_000
+
+
+class FetchResult(BaseModel):
+    """One retrieved page.
+
+    A retrieval that failed is still a ``FetchResult``, not an exception: a
+    competitor having an unreachable pricing page is a finding, not a crash, and
+    the report has to be able to say so. ``retrieval_status`` and the reason
+    fields are what let it distinguish "the page says nothing" from "we could not
+    read the page" — a distinction that matters a great deal to the spec's
+    anti-hallucination rules.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    final_url: str | None = None
+    status: int | None = None
+    content_type: str | None = None
+    text: str = ""
+    html: str = ""
+    title: str | None = None
+    retrieved_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    retrieval_status: Literal["ok", "failed", "blocked", "not_found", "skipped"] = "ok"
+    content_hash: str | None = None
+    error: str | None = None
+    provider: str | None = None
+    duration_ms: int = 0
+    page_type: str | None = None
+    content_length: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return self.retrieval_status == "ok"
+
+    @property
+    def is_snippet_only(self) -> bool:
+        """A fetch result is retrieved content, never a search snippet."""
+        return False
