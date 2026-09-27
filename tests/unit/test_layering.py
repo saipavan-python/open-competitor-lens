@@ -18,11 +18,18 @@ APP_ROOT = Path(__file__).resolve().parents[2] / "app"
 
 #: Ordered from lowest to highest. A module may import its own layer and any
 #: layer below it, never a layer above.
+#:
+#: `rag` sits at 3, with `models` and `repositories`: it is a domain library
+#: over stored documents, so it sits under `services` (which wraps it in
+#: `RagService`) and under `agents` (whose analysts are handed chunks, never an
+#: index). Putting it higher would let retrieval reach into services; putting it
+#: lower would mean it could not see `schemas`, which is where `Chunk` lives.
 LAYERS: dict[str, int] = {
     "core": 0,
     "schemas": 1,
     "utils": 2,
     "models": 3,
+    "rag": 3,
     "repositories": 4,
     "providers": 5,
     "services": 6,

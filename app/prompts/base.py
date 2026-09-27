@@ -32,7 +32,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.logging import get_logger
-from app.schemas.evidence import Evidence, Source
+from app.schemas.evidence import Evidence, Passage, Source
 from app.schemas.provider import ChatMessage
 
 log = get_logger(__name__)
@@ -75,6 +75,10 @@ class PromptContext(BaseModel):
     competitors: list[str] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     sources: list[Source] = Field(default_factory=list)
+    #: Raw retrieved text, for the analyst prompts that run *before* any claim
+    #: has been verified. See :class:`~app.schemas.evidence.Passage` for why
+    #: these are not evidence and must not be cited as such.
+    passages: list[Passage] = Field(default_factory=list)
     facts: dict[str, Any] = Field(default_factory=dict)
     instructions: str = ""
 
@@ -92,7 +96,15 @@ class PromptContext(BaseModel):
         tidied whitespace here would produce prompts whose quotes the gate then
         rejects. Each claim carries its index so the model can cite ``[E3]``
         and have that index mean one specific thing.
+
+        Retrieved passages render instead, and are indexed ``[P1]`` rather than
+        ``[E1]``, when there is no verified evidence — which is the state every
+        analyst runs in, since the evidence for a category is what the analyst
+        produces. The two index spaces are kept distinct so a model cannot cite
+        a passage as though it were a verified finding.
         """
+        if self.passages and not self.evidence:
+            return self._passage_block()
         if not self.evidence:
             return (
                 f"{EVIDENCE_HEADER}\n"
@@ -114,6 +126,23 @@ class PromptContext(BaseModel):
                 lines.append(f'    quote: "{item.evidence_text}"')
             if item.published_at:
                 lines.append(f"    published_at={item.published_at.isoformat()}")
+        return "\n".join(lines)
+
+    def _passage_block(self) -> str:
+        """Retrieved text, labelled so it is read as input rather than as a finding."""
+        lines = [
+            EVIDENCE_HEADER,
+            "RETRIEVED PASSAGES — these are pages this run fetched and has not "
+            "yet verified. Cite them by their source_id, quote them exactly, and "
+            "report as unknown anything they do not state.",
+        ]
+        for position, passage in enumerate(self.passages, start=1):
+            lines.append(passage.label(position))
+            if passage.title:
+                lines.append(f"    title: {passage.title}")
+            if passage.heading:
+                lines.append(f"    section: {passage.heading}")
+            lines.append(f'    text: "{passage.text}"')
         return "\n".join(lines)
 
 

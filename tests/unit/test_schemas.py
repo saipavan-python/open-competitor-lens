@@ -324,3 +324,54 @@ class TestPageTypeIsClassifiable:
     def test_page_type_is_a_str_enum_for_json(self) -> None:
         assert PageType.PRICING.value == "pricing"
         assert InsightType.PRICING.value == "pricing"
+
+
+class TestDocumentDerivation:
+    """`Document` derives `char_count` and `content_hash` on construction.
+
+    `DomainModel` validates on assignment, so deriving a field *inside* an
+    `after` validator re-enters that validator. For a normal page it settles
+    after one extra pass; for a whitespace-only page the content strips to the
+    empty string, `char_count` stays 0, and the derivation re-assigns 0 forever.
+    """
+
+    def _document(self, content: str):
+        from app.schemas.document import Document
+
+        return Document(
+            id="doc-1",
+            run_id="run-1",
+            source_id="src-1",
+            url="https://acme.example/",
+            canonical_url="https://acme.example/",
+            content=content,
+        )
+
+    def test_char_count_is_derived(self) -> None:
+        assert self._document("hello").char_count == 5
+
+    def test_a_whitespace_only_page_terminates(self) -> None:
+        """An empty page is an ordinary outcome of a crawl, not an edge case."""
+        assert self._document("   \n  ").char_count == 0
+
+    def test_an_empty_page_terminates(self) -> None:
+        assert self._document("").char_count == 0
+
+    def test_a_derived_hash_is_set(self) -> None:
+        assert self._document("hello").content_hash == "pending:doc-1"
+
+    def test_an_explicit_hash_is_left_alone(self) -> None:
+        from app.schemas.document import Document
+
+        document = Document(
+            id="doc-1",
+            run_id="run-1",
+            source_id="src-1",
+            url="https://acme.example/",
+            canonical_url="https://acme.example/",
+            content="hello",
+            content_hash="sha256:abc",
+            char_count=99,
+        )
+        assert document.content_hash == "sha256:abc"
+        assert document.char_count == 99

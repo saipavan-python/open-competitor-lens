@@ -17,6 +17,7 @@ from app.services.extraction_service import (
     ExtractionService,
 )
 from app.services.model_router import ModelRouter
+from app.services.rag_service import RagService
 from app.services.research_service import ResearchService
 from app.services.search_service import SearchService
 
@@ -34,6 +35,7 @@ __all__ = [
     "ExtractionResult",
     "ExtractionService",
     "ModelRouter",
+    "RagService",
     "ResearchService",
     "SearchService",
     "discover_links",

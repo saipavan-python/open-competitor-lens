@@ -70,8 +70,57 @@ class Document(DomainModel):
 
     @model_validator(mode="after")
     def _derive_hash(self) -> Document:
+        # `object.__setattr__` throughout, not `self.x = ...`. `DomainModel` sets
+        # `validate_assignment=True`, so a plain assignment re-enters this
+        # validator; that terminates for a non-empty document (the second pass
+        # finds a non-zero `char_count` and stops) but recurses forever on a
+        # whitespace-only one, which strips to "" and so re-assigns 0 every time.
+        # An empty page is an ordinary outcome of a crawl, not an edge case.
         if not self.content_hash:
             object.__setattr__(self, "content_hash", f"pending:{self.id}")
         if not self.char_count:
-            self.char_count = len(self.content)
+            object.__setattr__(self, "char_count", len(self.content or ""))
         return self
+
+
+class Chunk(DomainModel):
+    """One retrievable piece of a document, with its provenance attached.
+
+    Metadata travels on the chunk rather than being looked up from its parent,
+    because a chunk retrieved on its own has to answer "which company, which
+    page, which source" without a second query. A chunk that cannot answer that
+    cannot be cited, and an uncitable chunk in an analyst's context is a
+    hallucination waiting to happen.
+    """
+
+    id: str
+    document_id: str
+    run_id: str
+    source_id: str
+    url: str
+    text: str
+    ordinal: int = 0
+    company: str | None = None
+    competitor: str | None = None
+    page_type: PageType = PageType.OTHER
+    title: str | None = None
+    heading: str | None = None
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def entity(self) -> str | None:
+        """Whichever company this chunk is about, target or competitor."""
+        return self.competitor or self.company
+
+
+class RetrievedChunk(Chunk):
+    """A chunk as returned by retrieval, with its score and provenance trail.
+
+    The kept list of ``matched_by`` names the metadata filters that admitted
+    this chunk, so a surprising result can be traced to the filter that allowed
+    it rather than guessed at.
+    """
+
+    score: float = 0.0
+    matched_by: list[str] = Field(default_factory=list)
+    index_id: str | None = None

@@ -96,6 +96,38 @@ class Source(DomainModel):
         return True
 
 
+class Passage(DomainModel):
+    """A retrieved passage, before it has been analysed into a claim.
+
+    Distinct from :class:`Evidence` on purpose. Evidence is a *verified claim*
+    plus the quote supporting it, and it is what a report may cite. A passage is
+    raw text handed to a model to read, which supports nothing yet — it is the
+    input to the reasoning rather than its output.
+
+    Keeping them separate is what stops the two from being quietly conflated. An
+    analyst is given passages; what it produces is evidence; and only the second
+    may end up in a citation. The alternative — presenting retrieved text as
+    evidence — would have the report citing a chunk on the strength of text
+    nobody has read, which is the failure this whole system is arranged against.
+
+    Declared here, in ``schemas``, rather than reusing the retrieval layer's
+    ``Chunk``: this is the one crossing between the two, and it keeps the
+    dependency pointing from retrieval towards schemas, never back.
+    """
+
+    source_id: str
+    url: str
+    text: str
+    title: str | None = None
+    heading: str | None = None
+    source_type: SourceType | None = None
+    score: float | None = None
+
+    def label(self, index: int) -> str:
+        """The one line a model reads to know what this passage is."""
+        return f"[P{index}] source_id={self.source_id} url={self.url}"
+
+
 class Evidence(DomainModel):
     """One source-backed fact.
 
