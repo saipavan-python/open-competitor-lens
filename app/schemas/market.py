@@ -7,7 +7,7 @@ collapses into a single undifferentiated assertion.
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.core.constants import Confidence
 from app.schemas.common import DomainModel
@@ -58,7 +58,10 @@ class Opportunity(DomainModel):
     """A gap-derived opportunity.
 
     ``evidence`` must be non-empty: an opportunity with no evidence behind it is
-    a guess, and the schema refuses to represent one.
+    a guess, and the schema refuses to represent one. The rule is enforced here
+    rather than left to the agent that builds them, because an opportunity is
+    advice — the one part of a report a reader is most likely to act on, and the
+    part where an unsupported suggestion costs the most.
     """
 
     opportunity: str
@@ -69,6 +72,22 @@ class Opportunity(DomainModel):
     category: str | None = None
     effort: str | None = None
     impact: str | None = None
+
+    @model_validator(mode="after")
+    def _require_evidence(self) -> Opportunity:
+        """Refuse an opportunity with nothing behind it.
+
+        A model validator rather than a field one, and the reason is the default:
+        a field validator does not run when a field is left to its
+        ``default_factory``, so the default of an empty list — the exact case this
+        exists to catch — would have passed straight through.
+        """
+        if not [item for item in self.evidence if item and item.strip()]:
+            raise ValueError(
+                "an opportunity must cite at least one evidence id; a suggestion "
+                "nothing in the research supports is a guess presented as advice"
+            )
+        return self
 
     def __len__(self) -> int:  # pragma: no cover - convenience only
         return 1

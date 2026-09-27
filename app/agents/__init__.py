@@ -21,6 +21,7 @@ from app.agents.company_agent import (
     CompanyResolution,
     name_similarity,
 )
+from app.agents.comparison import ComparisonAgent
 from app.agents.competitor_agent import (
     VALIDATION_SIGNALS,
     CandidateSignals,
@@ -29,14 +30,19 @@ from app.agents.competitor_agent import (
     ValidationOutcome,
     Validator,
 )
+from app.agents.evidence_agent import EvidenceAgent
+from app.agents.fact_checker import FactCheckerAgent
 from app.agents.market_agent import MarketAnalyst
 from app.agents.marketing_agent import MarketingAnalyst
+from app.agents.opportunity import OPPORTUNITY_FIELDS, OpportunityAgent
 from app.agents.planner import PlannerAgent, PlannerInput
 from app.agents.pricing_agent import PricingAnalyst
 from app.agents.product_agent import ProductAnalyst
+from app.agents.report_agent import ReportAgent
 from app.agents.review_agent import ReviewAnalyst
 from app.agents.seo_agent import SeoAnalyst
 from app.agents.social_agent import SocialAnalyst
+from app.agents.supervisor import Supervisor
 from app.agents.technology_agent import TechnologyAnalyst
 from app.agents.website_agent import WebsiteAnalyst
 
@@ -59,6 +65,18 @@ ANALYSTS: tuple[type, ...] = (
 #: Analyst classes by category, for the graph to look one up by name.
 ANALYSTS_BY_CATEGORY: dict[str, type] = {analyst.category: analyst for analyst in ANALYSTS}
 
+#: The steps that turn the analysts' payloads into the report, in the order the
+#: graph runs them. Kept beside the analysts because the sequence is the contract:
+#: a comparison built before the analysts have run compares nothing, and a report
+#: assembled before the fact check would print claims nobody has checked.
+ASSEMBLY_AGENTS: tuple[type, ...] = (
+    ComparisonAgent,
+    OpportunityAgent,
+    EvidenceAgent,
+    FactCheckerAgent,
+    ReportAgent,
+)
+
 
 def analyst_for(category: str) -> type:
     """The analyst class for a category, or a clear error listing the real ones."""
@@ -74,26 +92,34 @@ def analyst_for(category: str) -> type:
 __all__ = [
     "ANALYSTS",
     "ANALYSTS_BY_CATEGORY",
+    "ASSEMBLY_AGENTS",
+    "OPPORTUNITY_FIELDS",
     "Agent",
     "AgentContext",
     "AgentResult",
     "AgentStatus",
     "CandidateSignals",
     "CategoryAnalyst",
+    "ComparisonAgent",
     "CompanyAgent",
     "CompanyCandidate",
     "CompanyResolution",
     "CompetitorAgent",
     "CompetitorSelection",
+    "EvidenceAgent",
+    "FactCheckerAgent",
     "MarketingAnalyst",
     "MarketAnalyst",
+    "OpportunityAgent",
     "PlannerAgent",
     "PlannerInput",
     "PricingAnalyst",
     "ProductAnalyst",
+    "ReportAgent",
     "ReviewAnalyst",
     "SeoAnalyst",
     "SocialAnalyst",
+    "Supervisor",
     "TechnologyAnalyst",
     "VALIDATION_SIGNALS",
     "ValidationOutcome",

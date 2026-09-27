@@ -136,3 +136,84 @@ def extract_quote(text: str, needle: str, *, window: int = 320) -> str | None:
     start = max(0, index - window // 3)
     return truncate(collapsed_text[start: index + len(collapsed_needle) + window],
                     window + len(collapsed_needle))
+
+
+#: A number that looks like a statistic: an optional currency symbol, thousands
+#: separators, a decimal part, an optional percentage or magnitude suffix. The
+#: lookbehind and lookahead keep version numbers, ``k8s`` and ``node20`` from
+#: being read as figures.
+_NUMBER = re.compile(
+    r"(?<![\w/])"
+    r"(?:[$€£]\s?)?"
+    r"\d[\d,]*(?:\.\d+)?"
+    r"\s?(?:%|percent|per cent)?"
+    r"\s?(?:[kKmMbB]|bn|mn)?"
+    r"(?![\w/])",
+    re.IGNORECASE,
+)
+
+#: Years are not statistics. A report is dated and every source is dated, so
+#: flagging every year as an unevidenced figure would make the check unusable
+#: rather than strict.
+_YEAR = re.compile(r"^(?:19|20)\d{2}$")
+
+#: Contexts in which a number is a date, an identifier or a section count rather
+#: than a statistic about the companies. Matched against the *line* a number sits
+#: on rather than the whole text: testing the whole text would let one
+#: "Section 7" anywhere in a paragraph exempt a figure in the same paragraph,
+#: which is the opposite of the rule.
+_NON_STATISTIC_CONTEXT = re.compile(
+    r"(?:\bhttps?://)"
+    r"|(?:\bsection\s+\d+)"
+    r"|(?:^\s*#{1,6}\s*\d+)"
+    r"|(?:^\s*\d+[.)]\s)",
+    re.IGNORECASE,
+)
+
+
+def _line_at(text: str, index: int) -> str:
+    """The line containing ``index``, which is what a number's context means."""
+    start = text.rfind("\n", 0, index) + 1
+    end = text.find("\n", index)
+    return text[start:] if end == -1 else text[start:end]
+
+
+def numeric_tokens(text: str) -> list[str]:
+    """Every statistic-looking number in a piece of text.
+
+    Years and non-statistic contexts are excluded here rather than at the call
+    sites, so a year cannot be smuggled past the check by a caller that forgot the
+    rule.
+
+    This lives in ``utils`` rather than beside the fact checker because the report
+    quality service applies the same rule to the same prose, and a service
+    importing from the agent layer above it would invert the dependency.
+    """
+    found: list[str] = []
+    for match in _NUMBER.finditer(text or ""):
+        token = match.group(0).strip()
+        digits = token.lstrip("$" + "\u20ac\u00a3 ").rstrip("%").replace(",", "")
+        digits = re.sub(r"(?:%|percent|per cent)$", "", digits, flags=re.IGNORECASE)
+        digits = re.sub(r"[kKmMbB]|bn|mn$", "", digits).strip()
+        if not digits or _YEAR.match(digits):
+            continue
+        if _NON_STATISTIC_CONTEXT.search(_line_at(text or "", match.start())):
+            continue
+        found.append(token)
+    return found
+
+
+def unsupported_numeric_tokens(claim: str, evidence_text: str) -> list[str]:
+    """Numbers in a claim that no evidence text contains.
+
+    Compared on digits alone, so "$10" in a claim matches "10" in a quote and
+    "10,000" matches "10000" - the same figure written the two ways prose and
+    tables write it. A claim whose number appears nowhere in its evidence is
+    reporting something the source does not say.
+    """
+    haystack = re.sub(r"[,\s]", "", evidence_text or "")
+    missing: list[str] = []
+    for token in numeric_tokens(claim):
+        if re.sub(r"[,\s]", "", token) not in haystack:
+            missing.append(token)
+    return missing
