@@ -148,7 +148,11 @@ class Settings(BaseSettings):
     competitor_count: int = Field(default=5, ge=1, le=50)
     max_redirects: int = Field(default=3, ge=0)
     allowed_url_ports: list[int] = Field(default_factory=lambda: [80, 443, 8080, 8443])
-    user_agent: str = "competitor-analysis-agent/0.1 (+research; respects robots.txt)"
+    #: Identifies the crawler honestly. This used to advertise "respects
+    #: robots.txt", and nothing in the codebase ever fetched or checked
+    #: robots.txt. Site operators see this string in their logs and may make
+    #: access decisions on the strength of it, so it states only what is true.
+    user_agent: str = "open-competitor-lens/0.1 (+competitive research)"
 
     @field_validator("cors_origins", "allowed_url_ports", mode="before")
     @classmethod
