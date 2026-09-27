@@ -56,8 +56,29 @@ class TestSettingsDefaults:
         assert settings.graph_rag_enabled is False
         assert settings.langchain_tracing_v2 is False
 
-    def test_offline_mode_used_when_no_llm_key(self) -> None:
+    def test_offline_mode_used_when_no_llm_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Offline is what a keyless deployment gets, and nothing else.
+
+        The keys are removed explicitly rather than assumed absent. This used to
+        take no arguments, so it passed on a developer machine with no key
+        exported and failed on one with ``OPENAI_API_KEY`` set — including a CI
+        job that had a secret, where the failure looks like a config regression
+        rather than a leaky test.
+        """
+        for key in ("OPENAI_API_KEY", "GEMINI_API_KEY"):
+            monkeypatch.delenv(key, raising=False)
+        reset_settings_cache()
         assert get_settings().resolved_llm_provider == "offline"
+
+    def test_a_key_in_the_ambient_environment_is_still_seen(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The counterpart: a real deployment's key must not be ignored."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test-value")
+        reset_settings_cache()
+        assert get_settings().resolved_llm_provider == "openai"
 
     def test_openai_selected_when_key_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-value")

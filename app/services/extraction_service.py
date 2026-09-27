@@ -17,9 +17,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from pydantic import BaseModel
+
 from app.core.logging import get_logger
 from app.schemas.provider import FetchResult
 from app.utils.hashing import sha256_text
+from app.utils.structured import parse_structured
+from app.utils.text import extract_quote
 from app.utils.urls import canonicalize_url
 
 log = get_logger(__name__)
@@ -162,6 +166,14 @@ class ExtractionService:
         self.llm = llm
 
     async def extract(self, result: FetchResult, schema: type) -> ExtractionResult:
+        """Extract ``schema``'s fields from one retrieved page.
+
+        Never raises for a model that did not comply. A failed extraction is
+        reported as an ``ExtractionResult`` with an ``error``, because a run that
+        analysed nine categories must not lose all of them to one page whose
+        model response was unparseable — and the error is what lets the report say
+        which category is thin instead of quietly printing less of it.
+        """
         if not result.ok:
             return ExtractionResult(
                 source_id=None, url=result.final_url or result.url,
@@ -172,13 +184,59 @@ class ExtractionService:
                 source_id=None, url=result.final_url or result.url,
                 data={"text": result.text},
             )
-        response = await self.llm.generate(  # type: ignore[attr-defined]
-            self._prompt(result, schema), schema=schema
-        )
+        try:
+            response = await self.llm.generate(  # type: ignore[attr-defined]
+                self._prompt(result, schema), schema=schema
+            )
+        except Exception as exc:  # noqa: BLE001 - one page must not end the run
+            return ExtractionResult(
+                source_id=None, url=result.final_url or result.url,
+                error=f"extraction call failed: {exc}",
+            )
+
+        # LLMResponse carries the completion as `content`, not `parsed`. The old
+        # code read a `parsed` attribute that does not exist, and because it was
+        # read with getattr(..., None) or {} it returned an empty dict for every
+        # successful extraction: the model was called, paid for, and its answer
+        # discarded. `data` is required for `ok`, so the run saw a clean list of
+        # failures rather than a silent success with nothing in it.
+        try:
+            data = parse_structured(response.content, schema)
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            return ExtractionResult(
+                source_id=None, url=result.final_url or result.url,
+                error=f"could not read the model's answer: {exc}",
+            )
+
         return ExtractionResult(
             source_id=None, url=result.final_url or result.url,
-            data=getattr(response, "parsed", None) or {},
+            data=data if isinstance(data, dict) else data.model_dump(),
+            quote=self._quote(result, data),
         )
+
+    def _quote(self, result: FetchResult, data: object) -> str:
+        """The sentence in the page that the extracted values came from.
+
+        Recorded so the extraction can later be checked against the page rather
+        than trusted. Best effort: a value with no matching sentence in the text
+        yields an empty quote, which reads as unverified downstream rather than
+        as verified with an empty citation.
+        """
+        if isinstance(data, dict):
+            values: object = data
+        elif isinstance(data, BaseModel):
+            values = data.model_dump()
+        else:
+            return ""
+        if not isinstance(values, dict):
+            return ""
+        for value in values.values():
+            if not isinstance(value, str) or len(value.strip()) < 8:
+                continue
+            quote = extract_quote(result.text, value.strip())
+            if quote:
+                return quote
+        return ""
 
     def _prompt(self, result: FetchResult, schema: type) -> str:
         return (

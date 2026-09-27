@@ -241,3 +241,64 @@ class TestContentCache:
         await service.crawl_site(HOST)
         await service.crawl_site(HOST)
         assert len(calls) == 1
+
+
+class TestCrawlReportIsUsableAsAList:
+    """The plan specified ``crawl_site -> list[FetchResult]``.
+
+    The implementation returns a ``CrawlReport``, which is strictly richer: the
+    per-page results plus the counts, the dedup decisions, and why the crawl
+    stopped. Dropping the wrapper to match the signature would throw away the
+    information a report exists to state — "we looked at 12 pages and stopped at
+    the budget" is not derivable from the 12 results. So the report stays, and
+    these tests hold it to the list contract, which is what lets a caller written
+    against the plan keep working unchanged.
+    """
+
+    async def test_it_iterates_as_its_pages(self) -> None:
+        web = _offline([_page("/", links='<a href="/pricing">Pricing</a>')])
+        report = await CrawlingService(web, max_depth=1).crawl_site(HOST)
+
+        assert [result.url for result in report] == [
+            result.url for result in report.results
+        ]
+        assert all(result.url.startswith(HOST) for result in report)
+
+    async def test_its_length_is_its_page_count(self) -> None:
+        web = _offline([_page("/")])
+        report = await CrawlingService(web).crawl_site(HOST)
+
+        assert len(report) == len(report.results) == report.pages_fetched
+
+    async def test_it_indexes_like_a_list(self) -> None:
+        web = _offline([_page("/")])
+        report = await CrawlingService(web).crawl_site(HOST)
+
+        assert report[0] is report.results[0]
+
+    async def test_iterating_and_indexing_agree_with_the_results(self) -> None:
+        """The two views cannot disagree, or a caller picks one and gets lies."""
+        web = _offline([_page("/", links='<a href="/a">A</a><a href="/b">B</a>')])
+        report = await CrawlingService(web, max_depth=1).crawl_site(HOST)
+
+        assert list(report) == report.results
+        assert [report[index] for index in range(len(report))] == report.results
+
+    async def test_the_extra_information_is_still_there(self) -> None:
+        """Being list-compatible is additive, not a replacement."""
+        web = _offline([_page("/")])
+        report = await CrawlingService(web).crawl_site(HOST)
+
+        assert report.summary()["pages_fetched"] == report.pages_fetched
+        assert report.stopped_because
+        assert isinstance(report.ok_results, list)
+
+    async def test_a_list_comprehension_over_a_crawl_works(self) -> None:
+        """The realistic caller: take the pages that fetched successfully."""
+        web = _offline([_page("/", links='<a href="/pricing">Pricing</a>')])
+        report = await CrawlingService(web, max_depth=1).crawl_site(HOST)
+
+        usable = [result.url for result in report if result.ok]
+
+        assert usable == [result.url for result in report.ok_results]
+        assert usable

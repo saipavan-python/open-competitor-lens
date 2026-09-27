@@ -9,8 +9,12 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, computed_field, field_validator
+from pydantic import Field, computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+#: The role-to-model settings. Used to tell "the deployment chose this model for
+#: this role" apart from "this is the default, and a vendor model should win".
+_ROLE_FIELDS = frozenset({"fast_model", "reasoning_model", "final_model"})
 
 ResearchDepth = Literal["quick", "standard", "deep"]
 
@@ -49,6 +53,11 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
     openai_embedding_model: str = "text-embedding-3-small"
+    #: Overrides the API endpoint. Set for any OpenAI-compatible gateway, proxy
+    #: or local model server; the adapter speaks chat completions, so anything
+    #: implementing that protocol works without a second provider. ``None`` uses
+    #: the SDK default.
+    openai_base_url: str | None = None
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-2.0-flash"
     tavily_api_key: str | None = None
@@ -61,9 +70,40 @@ class Settings(BaseSettings):
     graph_store_provider: str = "memory"
 
     # --------------------------------------------------------- model routing
+    #: Defaults are OpenAI ids, which is the wrong vendor's namespace for a
+    #: Gemini or gateway deployment. ``_seed_roles_from_vendor_model`` replaces
+    #: them when the deployment has not chosen roles itself.
     fast_model: str = "gpt-4o-mini"
     reasoning_model: str = "gpt-4o"
     final_model: str = "gpt-4o"
+
+    @model_validator(mode="after")
+    def _seed_roles_from_vendor_model(self) -> Settings:
+        """Let the configured vendor model stand in for unset role defaults.
+
+        Every model call goes through ``model_for_role``, so the role map decides
+        which model actually runs — and it defaults to OpenAI ids. A deployment
+        that set ``GEMINI_API_KEY`` and ``GEMINI_MODEL`` therefore selected the
+        Gemini adapter and then asked it for ``gpt-4o``: the vendor model setting
+        was dead, and the run failed on a model that vendor has never heard of.
+        The same applies to any OpenAI-compatible gateway, where ``gpt-4o`` need
+        not exist.
+
+        Seeded per role rather than all at once, so a deployment that overrides
+        just one role gets the vendor model for the rest instead of the stock
+        OpenAI defaults. An explicitly configured role is never touched, which is
+        what makes deliberately mixing vendors per role possible.
+        """
+        vendor_model = {
+            "openai": self.openai_model,
+            "gemini": self.gemini_model,
+        }.get(self.resolved_llm_provider)
+        if not vendor_model:
+            return self
+        for role in _ROLE_FIELDS:
+            if role not in self.model_fields_set:
+                setattr(self, role, vendor_model)
+        return self
 
     # ----------------------------------------------------------- vector/graph
     chroma_persist_directory: str = "./data/chroma"

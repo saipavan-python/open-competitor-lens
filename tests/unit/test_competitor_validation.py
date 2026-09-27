@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.agents.base import AgentContext
 from app.agents.competitor_agent import (
     CandidateSignals,
     CompetitorAgent,
@@ -283,11 +284,40 @@ class TestAgentContract:
         assert agent.max_iterations >= 1
 
     def test_the_agent_reports_its_output_schema(self) -> None:
-        from app.schemas.competitor import ValidatedCompetitor
+        """The selection, because that is what the agent returns.
+
+        Not a single ``ValidatedCompetitor``: the agent is asked for a *set* of
+        competitors plus the ones it threw away, and a graph that validated its
+        payload against a one-object schema would reject a correct result.
+        """
+        from app.schemas.competitor import CompetitorSelection
 
         assert CompetitorAgent(validator=_validator(PRIMARY)).output_schema is (
-            ValidatedCompetitor
+            CompetitorSelection
         )
+
+    async def test_the_declared_output_schema_matches_what_run_returns(self) -> None:
+        """The declaration and the actual payload cannot drift apart.
+
+        This is the check that would have caught the mismatch: the schema is
+        asserted against the type of the real payload, not against a name written
+        down independently of the code.
+        """
+        agent = CompetitorAgent(validator=_validator(PRIMARY))
+        result = await agent.run(
+            AgentContext(
+                company="Acme Cloud",
+                extras={
+                    "candidates": [
+                        CandidateSignals(
+                            candidate=_candidate(),
+                            signals=_strong_signals(),
+                        )
+                    ]
+                },
+            )
+        )
+        assert isinstance(result.payload, agent.output_schema)
 
 
 class TestValidatorStandalone:

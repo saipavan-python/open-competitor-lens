@@ -51,6 +51,11 @@ NAME_SIMILARITY_FLOOR = 0.75
 #: Below this, nothing is known well enough to crawl confidently.
 MIN_ACCEPTABLE_CONFIDENCE = 0.5
 
+#: How many search hits to consider when finding the company's own site. Small:
+#: the official site is nearly always on the first page, and a wide search here
+#: mostly returns directories and listicles that only add ranking noise.
+HIT_LIMIT = 10
+
 
 class CompanyCandidate(DomainModel):
     """A possible official home for the queried company."""
@@ -128,7 +133,11 @@ class CompanyAgent(Agent):
     name = "company_resolution"
     goal = "Determine the official domain for the company the user asked about."
     output_schema = CompanyIdentity
-    task_type = "company_resolution"
+    #: Must match a key in ``TASK_ROLES`` and a module in the prompt registry.
+    #: This was ``"company_resolution"``, which is in neither, so routing this
+    #: agent's model raised ``ValueError: Unknown task type`` at run time rather
+    #: than at wiring time. The registered name is the prompt's.
+    task_type = "company_identification"
 
     def __init__(self, *, hits: Sequence[SearchHit] = ()) -> None:
         self._hits = list(hits)
@@ -285,7 +294,59 @@ class CompanyAgent(Agent):
         )
 
     async def run(self, ctx: AgentContext) -> AgentResult:
-        raise NotImplementedError(
-            "CompanyAgent.resolve is pure and is called directly; the graph node "
-            "supplies the hits. See Task 12."
+        """Find candidates for the company, then resolve them to one domain.
+
+        This is the async adapter over :meth:`resolve`, which stays pure so the
+        ranking rules can be tested without a search provider. The agent gathers
+        its own candidates rather than demanding them from the caller, so it is
+        runnable on its own; a graph that has already searched passes its hits in
+        ``ctx.extras["hits"]`` and no second search happens.
+        """
+        hits = await self._hits_for(ctx)
+        sources = list(ctx.extras.get("sources", []) or [])
+        resolution = self.resolve(ctx.company, hits, sources=sources)
+
+        # Only the pages on the winning domain count as retrieved-and-used. A run
+        # that anchored on globex.com must not report acmecloud.com as evidence
+        # just because both were in the same candidate pool.
+        used = [
+            source.id
+            for source in sources
+            if source.domain and source.domain == resolution.domain
+        ]
+        result = AgentResult(
+            agent=self.name,
+            status=AgentStatus(resolution.status),
+            payload=resolution.identity,
+            retrieved_source_ids=used,
         )
+        if resolution.domain is None:
+            # Recorded as a shortfall, not raised: the run can continue by saying
+            # the target's own site was never found, and a report that names that
+            # gap is worth more than an exception.
+            result.warn(
+                resolution.rejected_reason
+                or f"no official domain could be resolved for {ctx.company!r}"
+            )
+        return result
+
+    async def _hits_for(self, ctx: AgentContext) -> list[SearchHit]:
+        """Search hits to resolve against, from the caller or from a search."""
+        supplied = list(ctx.extras.get("hits", []) or []) or list(self._hits)
+        if supplied:
+            return supplied
+        if ctx.search is None:
+            # Not an error here. Resolving against an already-retrieved official
+            # page needs no search, and a run that fetched the homepage first
+            # should be able to resolve from that alone.
+            return []
+        try:
+            return list(
+                await ctx.search.search(f"{ctx.company} official site", limit=HIT_LIMIT)
+            )
+        except Exception as exc:  # noqa: BLE001 - a search outage is not fatal
+            log.warning(
+                "company search failed; resolving from retrieved pages only",
+                extra={"company": ctx.company, "error": str(exc)},
+            )
+            return []

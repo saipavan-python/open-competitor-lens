@@ -30,8 +30,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from pydantic import Field
-
 from app.agents.base import Agent, AgentContext, AgentResult, AgentStatus
 from app.core.constants import (
     NON_PRIMARY_SOURCE_TYPES,
@@ -39,10 +37,18 @@ from app.core.constants import (
     SourceType,
 )
 from app.core.logging import get_logger
-from app.schemas.common import DomainModel
-from app.schemas.competitor import CompetitorCandidate, ValidatedCompetitor, ValidationSignal
+from app.prompts import PROMPTS
+from app.prompts.base import PromptContext
+from app.schemas.competitor import (
+    CandidateSignals,
+    CompetitorCandidate,
+    CompetitorSelection,
+    ValidationOutcome,
+    ValidationSignal,
+)
 from app.schemas.evidence import Source
 from app.utils.normalization import normalize_company_name
+from app.utils.structured import parse_structured
 
 log = get_logger(__name__)
 
@@ -67,47 +73,6 @@ VALIDATION_SIGNALS: tuple[str, ...] = (
 #: validation is genuinely lossy, bounded so a run cannot fan out without limit.
 POOL_MIN_MULTIPLE = 2
 POOL_MAX_MULTIPLE = 4
-
-
-class CandidateSignals(DomainModel):
-    """A candidate together with the signals gathered about it."""
-
-    candidate: CompetitorCandidate
-    signals: list[ValidationSignal] = Field(default_factory=list)
-
-
-class ValidationOutcome(DomainModel):
-    """The verdict on one candidate, accepted or not."""
-
-    candidate: CompetitorCandidate
-    accepted: bool
-    reason: str
-    signals: list[ValidationSignal] = Field(default_factory=list)
-    primary_signals: int = 0
-
-    def to_competitor(self) -> ValidatedCompetitor:
-        """The accepted form, carrying the reason it was kept."""
-        if not self.accepted:
-            raise ValueError(
-                f"refusing to promote a rejected candidate ({self.reason}) to a "
-                f"ValidatedCompetitor"
-            )
-        return ValidatedCompetitor(
-            **self.candidate.model_dump(),
-            relevance_reason=self.reason,
-            signals=list(self.signals),
-        )
-
-
-class CompetitorSelection(DomainModel):
-    """The outcome of selecting competitors from a pool."""
-
-    competitors: list[ValidatedCompetitor] = Field(default_factory=list)
-    rejected: list[ValidationOutcome] = Field(default_factory=list)
-    status: str = "ok"
-
-    def __len__(self) -> int:
-        return len(self.competitors)
 
 
 class Validator:
@@ -272,7 +237,11 @@ class CompetitorAgent(Agent):
 
     name = "competitor_discovery"
     goal = "Find the companies that genuinely compete with the target."
-    output_schema = ValidatedCompetitor
+    #: The selection, not a single competitor. This was ``ValidatedCompetitor``,
+    #: which is one element of the answer: an agent asked for three competitors
+    #: returns a set plus the rejected candidates, and a graph consuming the
+    #: declared schema would have found a list where it expected one object.
+    output_schema = CompetitorSelection
     task_type = "competitor_discovery"
 
     def __init__(
@@ -324,7 +293,145 @@ class CompetitorAgent(Agent):
         )
 
     async def run(self, ctx: AgentContext) -> AgentResult:
-        raise NotImplementedError(
-            "CompetitorAgent.select operates on a gathered pool; the graph node "
-            "supplies it. See Task 12."
+        """Gather a candidate pool, then keep the best of it.
+
+        Discovery is wide and uncritical; validation is where a weak candidate
+        dies. Both halves are here rather than split across the graph, because a
+        discovery step with no validation attached is exactly the failure this
+        system exists to prevent — and because it keeps the "every candidate is
+        judged" invariant in one place.
+
+        A pool supplied in ``ctx.extras["candidates"]`` is used as-is, which is how
+        a graph that already ran discovery avoids paying for it twice.
+        """
+        pool = await self._pool(ctx)
+        if not pool:
+            return AgentResult(
+                agent=self.name,
+                status=AgentStatus.PARTIAL,
+                warnings=[
+                    f"no competitor candidates were found for {ctx.company!r}, so "
+                    f"there was nothing to validate"
+                ],
+            )
+
+        selection = self.select(pool, competitor_count=ctx.competitor_count)
+        result = AgentResult(
+            agent=self.name,
+            status=AgentStatus(selection.status),
+            payload=selection,
         )
+        if len(selection.competitors) < ctx.competitor_count:
+            result.warn(
+                f"asked for {ctx.competitor_count} competitors and "
+                f"{len(selection.competitors)} survived validation out of "
+                f"{len(pool)} candidates"
+            )
+        if not selection.competitors and selection.rejected:
+            result.warn(
+                f"all {len(selection.rejected)} candidate(s) were rejected; the "
+                f"report will have no competitors to compare against"
+            )
+        return result
+
+    async def _pool(self, ctx: AgentContext) -> list[CandidateSignals]:
+        """The candidate pool, from the caller or from a discovery call."""
+        supplied = list(ctx.extras.get("candidates", []) or [])
+        if supplied:
+            return supplied
+        return await self._discover(ctx)
+
+    async def _discover(self, ctx: AgentContext) -> list[CandidateSignals]:
+        """Propose candidates with the discovery prompt, and gather signals.
+
+        Discovery is one LLM call and no validation: the model is asked to
+        brainstorm names, and every name it returns goes to the validator, which
+        runs with no model and no network. That ordering is deliberate — the part
+        that decides what counts as a competitor must not be the part that can be
+        talked into it.
+        """
+        if ctx.llm is None:
+            log.warning(
+                "competitor discovery has no llm; no candidates proposed",
+                extra={"company": ctx.company},
+            )
+            return []
+
+        prompt = PROMPTS[self.task_type]
+        messages = prompt.build(
+            PromptContext(
+                company=ctx.company,
+                research_goal=ctx.research_goal,
+                competitors=list(ctx.extras.get("competitors", []) or []),
+                sources=list(ctx.extras.get("sources", []) or []),
+            )
+        )
+        try:
+            response = await ctx.llm.generate(
+                messages[-1].content,
+                system=messages[0].content,
+                schema=prompt.OUTPUT_SCHEMA,
+            )
+        except Exception as exc:  # noqa: BLE001 - one call must not end the run
+            log.warning(
+                "competitor discovery call failed",
+                extra={"company": ctx.company, "error": str(exc)},
+            )
+            return []
+
+        try:
+            discovered = parse_structured(response.content, prompt.OUTPUT_SCHEMA)
+        except Exception as exc:  # noqa: BLE001 - reported as an empty pool
+            log.warning(
+                "competitor discovery returned unusable JSON",
+                extra={"company": ctx.company, "error": str(exc)},
+            )
+            return []
+
+        candidates = list(getattr(discovered, "candidates", []) or [])
+        wanted = self.pool_size_for(ctx.competitor_count)
+        return [
+            CandidateSignals(
+                candidate=candidate,
+                signals=self._signals_for(ctx, candidate),
+            )
+            for candidate in candidates[:wanted]
+        ]
+
+    def _signals_for(
+        self, ctx: AgentContext, candidate: CompetitorCandidate
+    ) -> list[ValidationSignal]:
+        """Signals for one candidate, from the pages the run already retrieved.
+
+        Only retrieved pages count. A candidate is validated against evidence, and
+        a search snippet is not evidence — so a candidate the model proposed and
+        nothing else corroborates ends up rejected, which is the correct outcome
+        for an unevidenced claim.
+
+        Self-exclusion is deliberately *not* handled here. It is a fact about the
+        candidate's identity rather than about any page, so it is the validator's
+        job and it applies whether or not the run retrieved anything. Re-deciding
+        it from page text would make the target's own exclusion depend on whether
+        a page happened to have body copy.
+        """
+        name = candidate.name.strip().lower()
+        if not name:
+            return []
+        signals: list[ValidationSignal] = []
+        for source in ctx.extras.get("sources", []) or []:
+            text = (source.text or "").lower()
+            if not text or name not in text:
+                continue
+            # One page naming the candidate is enough to propose the signal. The
+            # validator decides whether it is *sufficient*, which is the judgement
+            # that belongs to it rather than to the gathering step.
+            signals.append(
+                ValidationSignal(
+                    signal="co_occurrence",
+                    supported=True,
+                    source_ids=[source.id],
+                    detail="the candidate is named on a retrieved page",
+                )
+            )
+            break
+        return signals

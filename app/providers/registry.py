@@ -64,14 +64,160 @@ class ProviderSpec:
 def _unavailable(kind: ProviderKind, name: str) -> Callable[[Settings], Any]:
     """A factory for an adapter that does not exist in this deployment.
 
-    Provided so a misconfigured browser or graph store fails at the point of use
-    with an explanation, rather than at import time taking down the whole run.
+    Provided so a misconfigured graph store fails at the point of use with an
+    explanation, rather than at import time taking down the whole run.
     """
 
     def build(_settings: Settings) -> Any:
         raise ProviderNotConfiguredError(
             f"{name}", f"{kind.upper()}_PROVIDER_{name.upper()}"
         )
+
+    return build
+
+
+# --- real factories --------------------------------------------------------
+#
+# Each is a *function returning a factory*, so that the module-level catalogue in
+# ``default_specs()`` stays importable without any vendor SDK. The SDK import
+# happens inside the returned factory, which is only called by ``resolve()``. A
+# deployment that never resolves OpenAI never imports ``openai``, and the test
+# suite can build and inspect the whole catalogue with no vendor package
+# installed at all.
+
+
+def openai_llm_factory() -> Callable[[Settings], Any]:
+    """Build the OpenAI chat-completions provider."""
+
+    def build(settings: Settings) -> Any:
+        from app.providers.llm.openai import OpenAILLMProvider
+
+        provider = OpenAILLMProvider(
+            api_key=settings.openai_api_key or "",
+            default_model=settings.openai_model,
+            base_url=settings.openai_base_url or None,
+            timeout=settings.llm_timeout,
+        )
+        provider.set_profiles(_model_profiles(settings))
+        return provider
+
+    return build
+
+
+def gemini_llm_factory() -> Callable[[Settings], Any]:
+    """Build the Gemini provider."""
+
+    def build(settings: Settings) -> Any:
+        from app.providers.llm.gemini import GeminiLLMProvider
+
+        provider = GeminiLLMProvider(
+            api_key=settings.gemini_api_key or "",
+            default_model=settings.gemini_model,
+            timeout=settings.llm_timeout,
+        )
+        provider.set_profiles(_model_profiles(settings))
+        return provider
+
+    return build
+
+
+def _model_profiles(settings: Settings) -> dict[str, str]:
+    """The role-to-model mapping, read once so both LLM providers agree.
+
+    Both adapters need it, and duplicating the three-line mapping in each factory
+    is how the two providers end up disagreeing about which model answers a
+    ``reasoning`` role.
+    """
+    roles = ("fast", "reasoning", "final", "default")
+    return {role: settings.model_for_role(role) for role in roles}
+
+
+def tavily_search_factory() -> Callable[[Settings], Any]:
+    """Build the Tavily search provider."""
+
+    def build(settings: Settings) -> Any:
+        from app.providers.search.tavily import TavilySearchProvider
+
+        return TavilySearchProvider(
+            api_key=settings.tavily_api_key or "",
+            timeout=settings.search_timeout,
+        )
+
+    return build
+
+
+def http_web_factory() -> Callable[[Settings], Any]:
+    """Build the plain-HTTP web provider.
+
+    Takes no credential, so it is always available. The safe fetcher inside is
+    what enforces SSRF rules and the private-address block, so this is a real
+    provider rather than a stand-in.
+    """
+
+    def build(settings: Settings) -> Any:
+        from app.providers.web.http import HttpWebProvider
+
+        return HttpWebProvider(timeout=settings.http_timeout)
+
+    return build
+
+
+def firecrawl_web_factory() -> Callable[[Settings], Any]:
+    """Build the Firecrawl provider, for pages that need rendering."""
+
+    def build(settings: Settings) -> Any:
+        from app.providers.web.firecrawl import FirecrawlWebProvider
+
+        return FirecrawlWebProvider(
+            api_key=settings.firecrawl_api_key, timeout=settings.browser_timeout
+        )
+
+    return build
+
+
+def browser_use_factory() -> Callable[[Settings], Any]:
+    """Build the Playwright browser provider.
+
+    The constructor does not launch a browser, so resolving this provider stays
+    cheap; the launch happens on first navigation and raises
+    ``BrowserUnavailableError`` with the install command if the binaries are
+    missing.
+    """
+
+    def build(settings: Settings) -> Any:
+        from app.providers.browser.browser_use import BrowserUseProvider
+
+        return BrowserUseProvider(timeout=settings.browser_timeout, headless=True)
+
+    return build
+
+
+def openai_embedding_factory() -> Callable[[Settings], Any]:
+    """Build the OpenAI embedding provider."""
+
+    def build(settings: Settings) -> Any:
+        from app.providers.embedding.openai import OpenAIEmbeddingProvider
+
+        return OpenAIEmbeddingProvider(
+            api_key=settings.openai_api_key or "",
+            model=settings.openai_embedding_model,
+        )
+
+    return build
+
+
+def chroma_vector_factory() -> Callable[[Settings], Any]:
+    """Build the Chroma vector store.
+
+    No credential, so it is always registered as available. The client is built
+    on first use, so this resolves cheaply and a deployment with no write access
+    to the data directory fails at the first upsert rather than at startup.
+    """
+
+    def build(settings: Settings) -> Any:
+        from app.providers.vector.chroma import ChromaVectorStore
+
+        return ChromaVectorStore(path=settings.chroma_persist_directory)
 
     return build
 
@@ -191,11 +337,16 @@ def _offline(factory: Callable[[], Any]) -> Callable[[Settings], Any]:
 def default_specs() -> list[ProviderSpec]:
     """The provider catalogue.
 
-    Declared here rather than imported from the adapter packages so that the
-    registry can be constructed — and tested — without pulling in ``playwright``,
-    ``tavily`` or ``chromadb``. Task 6 replaces the real factories; the offline
-    entries are permanent, because deterministic fixtures are how the test suite
-    runs without credentials and without network.
+    Declared as factories rather than imported instances so that the registry can
+    be constructed — and tested — without pulling in ``playwright``, ``tavily`` or
+    ``chromadb`` at import time. Each real factory imports its own SDK lazily,
+    inside the function, so a deployment that never resolves that provider never
+    pays for the dependency.
+
+    The offline entries are permanent, not placeholders: deterministic fixtures
+    are how the test suite runs without credentials and without network, and an
+    offline provider that was genuinely unconfigured would make every test that
+    touches the evidence gate a network test.
     """
     from app.providers.offline import (
         OfflineBrowserProvider,
@@ -208,25 +359,25 @@ def default_specs() -> list[ProviderSpec]:
     )
 
     return [
-        ProviderSpec("llm", "openai", _unavailable("llm", "openai"),
+        ProviderSpec("llm", "openai", openai_llm_factory(),
                      settings_fields=("openai_api_key",)),
-        ProviderSpec("llm", "gemini", _unavailable("llm", "gemini"),
+        ProviderSpec("llm", "gemini", gemini_llm_factory(),
                      settings_fields=("gemini_api_key",)),
         ProviderSpec("llm", "offline", _offline(OfflineLLMProvider)),
-        ProviderSpec("search", "tavily", _unavailable("search", "tavily"),
+        ProviderSpec("search", "tavily", tavily_search_factory(),
                      settings_fields=("tavily_api_key",)),
         ProviderSpec("search", "offline", _offline(OfflineSearchProvider)),
-        ProviderSpec("web", "http", _offline(OfflineWebProvider)),
-        ProviderSpec("web", "firecrawl", _unavailable("web", "firecrawl"),
+        ProviderSpec("web", "http", http_web_factory()),
+        ProviderSpec("web", "firecrawl", firecrawl_web_factory(),
                      settings_fields=("firecrawl_api_key",)),
         ProviderSpec("web", "offline", _offline(OfflineWebProvider)),
-        ProviderSpec("browser", "browser_use", _unavailable("browser", "browser_use"),
+        ProviderSpec("browser", "browser_use", browser_use_factory(),
                      settings_fields=("langchain_api_key",)),
         ProviderSpec("browser", "offline", _offline(OfflineBrowserProvider)),
-        ProviderSpec("embedding", "openai", _unavailable("embedding", "openai"),
+        ProviderSpec("embedding", "openai", openai_embedding_factory(),
                      settings_fields=("openai_api_key",)),
         ProviderSpec("embedding", "offline", _offline(OfflineEmbeddingProvider)),
-        ProviderSpec("vector", "chroma", _unavailable("vector", "chroma")),
+        ProviderSpec("vector", "chroma", chroma_vector_factory()),
         ProviderSpec("vector", "memory", _offline(OfflineVectorStore)),
         ProviderSpec("vector", "offline", _offline(OfflineVectorStore)),
         ProviderSpec("graph", "memory", _offline(OfflineGraphStore)),

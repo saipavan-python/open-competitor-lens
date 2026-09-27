@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit
 
@@ -55,6 +55,26 @@ class CrawlReport:
     @property
     def ok_results(self) -> list[FetchResult]:
         return [result for result in self.results if result.ok]
+
+    # The plan specified ``crawl_site -> list[FetchResult]``. This report is
+    # strictly richer: it carries the per-page results *and* the counts, the dedup
+    # decisions and why the crawl stopped, which is what a run needs in order to
+    # say "we looked at 12 pages and stopped at the budget" rather than "here are
+    # 12 pages". Dropping the wrapper to satisfy the signature would throw away
+    # exactly the information a report exists to state.
+    #
+    # So the signature stays, and these three methods make the report usable
+    # wherever the plan's list was expected. A caller written against
+    # ``list[FetchResult]`` iterates it, indexes it and asks its length, and all
+    # three work without the caller knowing it received a report.
+    def __iter__(self) -> Iterator[FetchResult]:
+        return iter(self.results)
+
+    def __len__(self) -> int:
+        return len(self.results)
+
+    def __getitem__(self, index: int) -> FetchResult:
+        return self.results[index]
 
     def summary(self) -> dict[str, int | str]:
         return {
