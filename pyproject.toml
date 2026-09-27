@@ -12,13 +12,16 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "lxml>=5.3",
     "trafilatura>=1.12",
-    "sqlalchemy>=2.0",
+    "sqlalchemy[asyncio]>=2.0",
     "aiosqlite>=0.20",
+    "greenlet>=3.0",
     "langgraph>=0.2.50",
     "langchain-core>=0.3",
     "chromadb>=0.5",
     "openai>=1.50",
     "google-genai>=0.3",
+    "tavily-python>=0.5",
+    "playwright>=1.48",
 ]
 
 [project.optional-dependencies]
