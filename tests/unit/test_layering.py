@@ -62,10 +62,22 @@ def _imported_layers(tree: ast.AST, current_layer: str) -> list[tuple[str, int]]
 
 
 def _python_files() -> list[Path]:
+    """Every module in the app, including package ``__init__`` files.
+
+    ``__init__.py`` is included deliberately even though the filter otherwise
+    skips underscore-prefixed names: a package's ``__init__`` is where
+    re-exports live, which makes it the single most likely place for an upward
+    import to hide. Skipping it left the layering guarantee unproven for exactly
+    the files that gather a layer's public surface.
+    """
     return sorted(
         path
         for path in APP_ROOT.rglob("*.py")
-        if "__pycache__" not in path.parts and not path.name.startswith("_")
+        if "__pycache__" not in path.parts
+        # `app/__init__.py` is the package root and belongs to no layer; only
+        # the layer packages below it are subject to the ordering rule.
+        and len(path.relative_to(APP_ROOT).parts) > 1
+        and (path.name == "__init__.py" or not path.name.startswith("_"))
     )
 
 
